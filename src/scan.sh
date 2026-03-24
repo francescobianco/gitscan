@@ -13,6 +13,19 @@ GITSCAN_PATH_PATTERNS=(
 )
 
 # ---------------------------------------------------------------------------
+# IPv4 detection
+# ---------------------------------------------------------------------------
+GITSCAN_IP_PATTERN='([0-9]{1,3}\.){3}[0-9]{1,3}'
+
+# IPs in this list are never reported (additive — user additions are appended).
+GITSCAN_IP_EXCEPTIONS=(
+    "0.0.0.0"
+    "127.0.0.1"
+    "127.0.1.1"
+    "255.255.255.255"
+)
+
+# ---------------------------------------------------------------------------
 # Default content patterns (ERE, used with git log -G and grep -E)
 # ---------------------------------------------------------------------------
 GITSCAN_CONTENT_PATTERNS=(
@@ -62,6 +75,9 @@ gitscan_scan_run() {
     gitscan_utils_info "Scanning file content..."
     gitscan_scan_content "$mirror_dir" "$findings_file"
 
+    gitscan_utils_info "Scanning for IP addresses..."
+    gitscan_scan_ips "$mirror_dir" "$findings_file"
+
     local count
     count=$(tail -n +2 "$findings_file" | wc -l | tr -d ' ')
     gitscan_utils_info "Scan complete — $count finding(s) saved to $findings_file"
@@ -76,23 +92,26 @@ gitscan_scan_load_patterns() {
     file="$1"
     section=""
 
+    # paths and content are fully replaced by the custom file;
+    # ip-exceptions are appended to the built-in defaults.
     GITSCAN_PATH_PATTERNS=()
     GITSCAN_CONTENT_PATTERNS=()
 
     while IFS= read -r line || [ -n "$line" ]; do
-        # skip empty lines and comments
         case "$line" in
             ""|\#*) continue ;;
         esac
 
         case "$line" in
-            "[paths]")   section="paths";   continue ;;
-            "[content]") section="content"; continue ;;
+            "[paths]")         section="paths";         continue ;;
+            "[content]")       section="content";       continue ;;
+            "[ip-exceptions]") section="ip-exceptions"; continue ;;
         esac
 
         case "$section" in
-            paths)   GITSCAN_PATH_PATTERNS+=("$line") ;;
-            content) GITSCAN_CONTENT_PATTERNS+=("$line") ;;
+            paths)         GITSCAN_PATH_PATTERNS+=("$line") ;;
+            content)       GITSCAN_CONTENT_PATTERNS+=("$line") ;;
+            ip-exceptions) GITSCAN_IP_EXCEPTIONS+=("$line") ;;
         esac
     done < "$file"
 }
@@ -154,6 +173,48 @@ gitscan_scan_paths() {
         fi
     done < <(git --git-dir="$git_dir" \
         log --all --diff-filter=A --name-only --format="" 2>/dev/null | sort -u)
+}
+
+# Returns 0 if the IP is in the exceptions list, 1 otherwise.
+gitscan_scan_is_ip_exception() {
+    local ip ex
+    ip="$1"
+    for ex in "${GITSCAN_IP_EXCEPTIONS[@]}"; do
+        [ "$ip" = "$ex" ] && return 0
+    done
+    return 1
+}
+
+# Scan git history for IPv4 addresses, skipping exceptions.
+# Each unique non-excepted IP per commit+file is recorded as a finding.
+gitscan_scan_ips() {
+    local git_dir findings_file
+    git_dir="$1"
+    findings_file="$2"
+
+    local hash author date
+    while IFS='|' read -r hash author date; do
+        local file
+        while IFS= read -r file; do
+            [ -z "$file" ] && continue
+
+            local ip
+            while IFS= read -r ip; do
+                [ -z "$ip" ] && continue
+                if ! gitscan_scan_is_ip_exception "$ip"; then
+                    gitscan_scan_record "$findings_file" \
+                        "$hash" "$author" "$date" "$file" "ip" "$ip"
+                fi
+            done < <(git --git-dir="$git_dir" \
+                show "${hash}:${file}" 2>/dev/null | \
+                grep -oE -e "$GITSCAN_IP_PATTERN" | sort -u)
+
+        done < <(git --git-dir="$git_dir" \
+            diff-tree --no-commit-id -r --diff-filter=AM --name-only \
+            "$hash" 2>/dev/null)
+
+    done < <(git --git-dir="$git_dir" \
+        log --all --format="%H|%ae|%ai" -G "$GITSCAN_IP_PATTERN" 2>/dev/null)
 }
 
 # Scan git history for files whose content matches sensitive patterns.

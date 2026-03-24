@@ -1,6 +1,9 @@
 # GITSCAN default patterns
 # Lines starting with # are comments.
-# Sections: [paths] for filename/extension globs, [content] for ERE content patterns.
+# Sections:
+#   [paths]         — filename/extension globs
+#   [content]       — ERE content patterns
+#   [ip-exceptions] — IPv4 addresses to ignore (appended to built-in defaults)
 
 [paths]
 *.pem
@@ -48,3 +51,9 @@ xox[baprs]-[0-9a-zA-Z-]{10,48}
 AIza[0-9A-Za-z_-]{35}
 AWS_SECRET_ACCESS_KEY[[:space:]]*=[[:space:]]*[A-Za-z0-9/+]{40}
 SG\.[0-9A-Za-z_-]{22}\.[0-9A-Za-z_-]{43}
+
+[ip-exceptions]
+# Built-in defaults: 0.0.0.0  127.0.0.1  127.0.1.1  255.255.255.255
+# Add project-specific IPs or ranges here, one per line:
+# 192.168.1.1
+# 10.0.0.1
