@@ -42,6 +42,7 @@ gitscan_scan_run() {
     patterns_file="${work_dir}/patterns.txt"
 
     gitscan_utils_verify_mirror "$work_dir" || exit 1
+    gitscan_utils_backup_if_needed "$mirror_dir"
 
     # Load custom patterns if file exists
     if [ -f "$patterns_file" ]; then

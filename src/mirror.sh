@@ -1,7 +1,7 @@
 
 gitscan_mirror_run() {
     local url work_dir mirror_dir
-    url="$1"
+    url="${1:-}"
     work_dir="$(gitscan_utils_resolve_workdir "${2:-}")"
 
     [ -z "$url" ] && {
@@ -14,11 +14,14 @@ gitscan_mirror_run() {
     mkdir -p "$work_dir"
     mkdir -p "$(gitscan_utils_extracted_dir "$work_dir")"
 
-    if [ -d "$mirror_dir" ]; then
-        gitscan_utils_info "Mirror already exists at $mirror_dir — updating..."
+    if [ -d "$mirror_dir" ] && \
+       git --git-dir="$mirror_dir" rev-parse --git-dir >/dev/null 2>&1; then
+        # Existing mirror: backup before updating
+        gitscan_utils_backup_if_needed "$mirror_dir"
+        gitscan_utils_info "Updating mirror at $mirror_dir ..."
         git --git-dir="$mirror_dir" remote update --prune
     else
-        gitscan_utils_info "Cloning $url as mirror to $mirror_dir..."
+        gitscan_utils_info "Cloning $url as mirror to $mirror_dir ..."
         git clone --mirror "$url" "$mirror_dir"
     fi
 

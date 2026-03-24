@@ -1,5 +1,11 @@
 
 GITSCAN_VERSION="0.1.0"
+GITSCAN_BACKUP_DONE=0
+GITSCAN_NO_BACKUP=0
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 
 gitscan_utils_log() {
     local level msg
@@ -8,17 +14,13 @@ gitscan_utils_log() {
     echo "[$(date '+%H:%M:%S')] [$level] $msg" >&2
 }
 
-gitscan_utils_info() {
-    gitscan_utils_log "INFO" "$1"
-}
+gitscan_utils_info()  { gitscan_utils_log "INFO" "$1"; }
+gitscan_utils_warn()  { gitscan_utils_log "WARN" "$1"; }
+gitscan_utils_error() { gitscan_utils_log "ERROR" "$1"; }
 
-gitscan_utils_warn() {
-    gitscan_utils_log "WARN" "$1"
-}
-
-gitscan_utils_error() {
-    gitscan_utils_log "ERROR" "$1"
-}
+# ---------------------------------------------------------------------------
+# Dependency check
+# ---------------------------------------------------------------------------
 
 gitscan_utils_check_deps() {
     local dep
@@ -30,12 +32,16 @@ gitscan_utils_check_deps() {
     done
 }
 
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+
 gitscan_utils_usage() {
     cat <<EOF
 gitscan v${GITSCAN_VERSION} - Git history scanner for sensitive data
 
 USAGE:
-    gitscan <command> [options]
+    gitscan [--no-backup] <command> [options]
 
 COMMANDS:
     mirror <url> [work-dir]    Clone repository as local mirror
@@ -45,83 +51,193 @@ COMMANDS:
     clean [work-dir]           Generate git-filter-repo cleanup script
     run <url> [work-dir]       Run all steps in sequence
 
-OPTIONS:
+GLOBAL FLAGS:
+    --no-backup                Skip safety backup (use with care)
     --help, -h                 Show this help
 
 WORK DIR:
-    If omitted or '.', the current directory ($PWD) is used.
-    Relative paths are resolved from $PWD.
-    The work dir must contain a mirror/ bare clone (created by 'gitscan mirror').
-    Contains: mirror/ findings.tsv extracted/ report.txt cleanup.sh
+    If omitted or '.', \$PWD is used.
+    Relative paths are resolved from \$PWD.
+    The work dir can be:
+      a) A bare git repo itself   → gitscan uses it directly as the mirror
+      b) A directory containing a mirror/ bare repo (standard layout)
+      c) Any directory with a bare repo subdir (non-standard mirror name)
+    Outputs (findings.tsv, report.txt, ...) are placed in the work dir.
+
+BACKUP:
+    Before every action gitscan creates a safety backup in:
+      ~/.gitscan/backups/<repo>_<timestamp>/
+    If a valid backup already exists for that repo it is reused — no
+    redundant clones. Use --no-backup to skip.
 
 EXAMPLES:
     gitscan run https://github.com/user/repo
     gitscan mirror https://github.com/user/repo ./workspace
-    gitscan scan ./workspace
-    gitscan report ./workspace
-    gitscan clean ./workspace
+    cd ./workspace/mirror && gitscan scan
+    gitscan scan .                       # from inside the bare mirror dir
+    gitscan --no-backup scan ./workspace
 EOF
 }
 
-# Resolve a work-dir argument to an absolute path.
-# No argument or '.' → $PWD; relative paths → $PWD/<path>; absolute → unchanged.
+# ---------------------------------------------------------------------------
+# Path resolution
+# ---------------------------------------------------------------------------
+
+# Resolve a work-dir CLI argument to an absolute path.
+# Empty or '.' → $PWD; relative → $PWD/<arg>; absolute → unchanged.
 gitscan_utils_resolve_workdir() {
-    local arg resolved
+    local arg path
     arg="${1:-}"
 
     if [ -z "$arg" ] || [ "$arg" = "." ]; then
-        echo "$PWD"
+        path="$PWD"
+    else
+        case "$arg" in
+            /*) path="$arg" ;;
+            *)  path="${PWD}/${arg}" ;;
+        esac
+    fi
+
+    echo "$path"
+}
+
+# Locate the mirror bare repo given a work dir. Resolution order:
+#   1. work_dir itself is a bare git repo  → use it directly
+#   2. work_dir/mirror is a bare git repo  → standard layout
+#   3. any immediate subdir is a bare repo → non-standard mirror name
+#   4. fallback: work_dir/mirror           → used for error messages / first clone
+gitscan_utils_mirror_dir() {
+    local work_dir candidate subdir
+    work_dir="$1"
+
+    # 1. work_dir IS the mirror
+    if git --git-dir="$work_dir" rev-parse --git-dir >/dev/null 2>&1; then
+        echo "$work_dir"
         return 0
     fi
 
-    case "$arg" in
-        /*)  resolved="$arg" ;;
-        *)   resolved="${PWD}/${arg}" ;;
-    esac
+    # 2. Standard: work_dir/mirror
+    candidate="${work_dir}/mirror"
+    if [ -d "$candidate" ] && \
+       git --git-dir="$candidate" rev-parse --git-dir >/dev/null 2>&1; then
+        echo "$candidate"
+        return 0
+    fi
 
-    echo "$resolved"
+    # 3. Any bare repo subdir (non-standard mirror name)
+    if [ -d "$work_dir" ]; then
+        for subdir in "${work_dir}"/*/; do
+            subdir="${subdir%/}"
+            [ -d "$subdir" ] || continue
+            if git --git-dir="$subdir" rev-parse --git-dir >/dev/null 2>&1; then
+                echo "$subdir"
+                return 0
+            fi
+        done
+    fi
+
+    # 4. Fallback
+    echo "${work_dir}/mirror"
 }
 
-# Verify that <work_dir>/mirror is a real bare mirror clone.
-# Prints an actionable error and returns 1 if it is not.
+# ---------------------------------------------------------------------------
+# Mirror validation
+# ---------------------------------------------------------------------------
+
 gitscan_utils_verify_mirror() {
     local work_dir mirror_dir
     work_dir="$1"
     mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
 
-    if [ ! -d "$mirror_dir" ]; then
-        gitscan_utils_error "No mirror found at '$mirror_dir'"
-        echo "" >&2
-        echo "  Create a mirror with:" >&2
-        echo "    gitscan mirror <repo-url> $work_dir" >&2
-        echo "" >&2
-        echo "  Or clone manually:" >&2
-        echo "    git clone --mirror <repo-url> $mirror_dir" >&2
-        return 1
-    fi
-
     if ! git --git-dir="$mirror_dir" rev-parse --git-dir >/dev/null 2>&1; then
-        gitscan_utils_error "'$mirror_dir' exists but is not a valid bare git repository"
+        gitscan_utils_error "No valid git mirror found in '$work_dir'"
         echo "" >&2
-        echo "  Remove it and recreate the mirror:" >&2
-        echo "    rm -rf $mirror_dir" >&2
+        echo "  Tip: to create a mirror run:" >&2
         echo "    gitscan mirror <repo-url> $work_dir" >&2
+        echo "" >&2
+        echo "  Or clone manually and then enter the directory:" >&2
+        echo "    git clone --mirror <repo-url> ${work_dir}/mirror" >&2
+        echo "    cd ${work_dir}/mirror && gitscan scan" >&2
         return 1
     fi
 
     if ! git --git-dir="$mirror_dir" config --get remote.origin.mirror >/dev/null 2>&1; then
-        gitscan_utils_warn "'$mirror_dir' is a bare repo but does not appear to be a mirror clone"
+        gitscan_utils_warn "'$mirror_dir' is a bare repo but not a proper mirror clone"
         gitscan_utils_warn "For full history coverage use: gitscan mirror <repo-url> $work_dir"
     fi
 
     return 0
 }
 
-gitscan_utils_mirror_dir() {
-    local work_dir
-    work_dir="$1"
-    echo "${work_dir}/mirror"
+# ---------------------------------------------------------------------------
+# Backup
+# ---------------------------------------------------------------------------
+
+# Create a safety backup in ~/.gitscan/backups/ unless:
+#   a) --no-backup flag  (GITSCAN_NO_BACKUP=1)
+#   b) a valid, integrity-verified backup already exists for this repo
+#   c) a backup was already created in this process (GITSCAN_BACKUP_DONE=1)
+gitscan_utils_backup_if_needed() {
+    local mirror_dir
+    mirror_dir="$1"
+
+    if [ "${GITSCAN_NO_BACKUP:-0}" = "1" ]; then
+        gitscan_utils_info "Backup skipped (--no-backup)"
+        return 0
+    fi
+
+    # Fast path: already done in this session
+    [ "${GITSCAN_BACKUP_DONE:-0}" = "1" ] && return 0
+
+    local remote_url repo_slug
+    remote_url="$(git --git-dir="$mirror_dir" \
+        config --get remote.origin.url 2>/dev/null || true)"
+
+    if [ -z "$remote_url" ]; then
+        gitscan_utils_warn "Cannot determine remote URL — backup skipped"
+        return 0
+    fi
+
+    repo_slug="$(echo "$remote_url" | \
+        sed 's|.*[/:]||; s|\.git$||; s|[^a-zA-Z0-9._-]|_|g')"
+
+    # Persistent check: reuse any existing valid backup for this repo
+    local backup_base existing
+    backup_base="${HOME}/.gitscan/backups"
+    if [ -d "$backup_base" ]; then
+        for existing in "${backup_base}/${repo_slug}_"*/; do
+            existing="${existing%/}"
+            [ -d "$existing" ] || continue
+            if git --git-dir="$existing" rev-parse --git-dir >/dev/null 2>&1; then
+                gitscan_utils_info "Backup verified at $existing — skipping new backup"
+                GITSCAN_BACKUP_DONE=1
+                return 0
+            fi
+        done
+    fi
+
+    # No valid backup found: create one now
+    gitscan_utils_backup "$mirror_dir" "$remote_url" "$repo_slug"
+    GITSCAN_BACKUP_DONE=1
 }
+
+gitscan_utils_backup() {
+    local mirror_dir remote_url repo_slug timestamp backup_dir
+    mirror_dir="$1"
+    remote_url="$2"
+    repo_slug="$3"
+    timestamp="$(date '+%Y%m%d_%H%M%S')"
+    backup_dir="${HOME}/.gitscan/backups/${repo_slug}_${timestamp}"
+
+    gitscan_utils_info "Creating safety backup at $backup_dir ..."
+    mkdir -p "${HOME}/.gitscan/backups"
+    git clone --mirror "$remote_url" "$backup_dir"
+    gitscan_utils_info "Backup ready: $backup_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Output path helpers
+# ---------------------------------------------------------------------------
 
 gitscan_utils_findings_file() {
     local work_dir

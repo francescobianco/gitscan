@@ -7,6 +7,7 @@ gitscan_clean_run() {
     mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
 
     gitscan_utils_verify_mirror "$work_dir" || exit 1
+    gitscan_utils_backup_if_needed "$mirror_dir"
 
     [ ! -f "$findings_file" ] && {
         gitscan_utils_error "Findings not found at $findings_file. Run 'gitscan scan' first."
