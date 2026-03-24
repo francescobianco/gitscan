@@ -44,12 +44,16 @@ USAGE:
     gitscan [--no-backup] <command> [options]
 
 COMMANDS:
-    mirror <url> [work-dir]    Clone repository as local mirror
-    scan [work-dir]            Scan history for sensitive data
-    extract [work-dir]         Extract suspicious file contents
-    report [work-dir]          Generate findings report
-    clean [work-dir]           Generate git-filter-repo cleanup script
-    run <url> [work-dir]       Run all steps in sequence
+    mirror <url> [work-dir]         Clone repository as local mirror
+    scan [work-dir]                 Scan history for sensitive data
+    extract [work-dir]              Extract suspicious file contents
+    report [work-dir]               Generate findings report
+    suggest [work-dir]              Show remediation suggestions
+    remove-file <file> [work-dir]   Remove a file from all git history
+    mask-ip <ip> [work-dir]         Replace an IP with X.X.X.X in all history
+    push [work-dir]                 Force-push rewritten history to remote
+    clean [work-dir]                Generate git-filter-repo cleanup script
+    run <url> [work-dir]            Run all steps in sequence
 
 GLOBAL FLAGS:
     --no-backup                Skip safety backup (use with care)

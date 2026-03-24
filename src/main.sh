@@ -5,6 +5,7 @@ module scan
 module extract
 module report
 module clean
+module suggest
 
 inject file patterns.txt
 
@@ -28,12 +29,16 @@ main() {
     gitscan_utils_check_deps
 
     case "$cmd" in
-        mirror)  gitscan_mirror_run "${args[@]}" ;;
-        scan)    gitscan_scan_run "${args[@]}" ;;
-        extract) gitscan_extract_run "${args[@]}" ;;
-        report)  gitscan_report_run "${args[@]}" ;;
-        clean)   gitscan_clean_run "${args[@]}" ;;
-        run)     gitscan_run_all "${args[@]}" ;;
+        mirror)      gitscan_mirror_run "${args[@]}" ;;
+        scan)        gitscan_scan_run "${args[@]}" ;;
+        extract)     gitscan_extract_run "${args[@]}" ;;
+        report)      gitscan_report_run "${args[@]}" ;;
+        clean)       gitscan_clean_run "${args[@]}" ;;
+        suggest)     gitscan_suggest_run "${args[@]}" ;;
+        remove-file) gitscan_remove_file_run "${args[@]}" ;;
+        mask-ip)     gitscan_mask_ip_run "${args[@]}" ;;
+        push)        gitscan_push_run "${args[@]}" ;;
+        run)         gitscan_run_all "${args[@]}" ;;
         --help|-h|help) gitscan_utils_usage ;;
         *)
             gitscan_utils_error "Unknown command: $cmd"
