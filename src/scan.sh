@@ -176,7 +176,7 @@ gitscan_scan_content() {
                 [ -z "$file" ] && continue
 
                 if git --git-dir="$git_dir" \
-                    show "${hash}:${file}" 2>/dev/null | grep -qE "$ptn"; then
+                    show "${hash}:${file}" 2>/dev/null | grep -qE -e "$ptn"; then
 
                     gitscan_scan_record "$findings_file" \
                         "$hash" "$author" "$date" "$file" "content" "$ptn"
