@@ -1,0 +1,944 @@
+#!/usr/bin/env bash
+set -e
+
+# @section_code: SC000
+# @section_name: blueprint
+# @blueprint_name: SSP
+# @blueprint_version: 1.0
+# @blueprint_url: https://mush.javanile.org/blueprint/
+
+# @section_code: SC001
+# @section_name: file-meta
+# @package: gitscan
+# @file_type: build-entrypoint
+# @build_type: bin
+# @build_with: Mush v0.2.0 (2026-03-22 develop)
+# @build_date: 2026-03-24T15:01:04Z
+
+# @section_code: SC005
+# @section_name: functions
+use() { return 0; }
+extern() { return 0; }
+legacy() { return 0; }
+module() { return 0; }
+public() { return 0; }
+embed() { return 0; }
+inject() { return 0; }
+
+# @section_code: SC007
+# @section_name: source
+# @source_index: 1
+# @source_file: src/main.sh
+# @portion_type: entrypoint
+
+module utils
+module mirror
+module scan
+module extract
+module report
+module clean
+
+inject file patterns.txt
+
+main() {
+    local cmd
+    local args
+    args=()
+
+    # Extract global flags before command dispatch
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --no-backup) export GITSCAN_NO_BACKUP=1 ;;
+            *)           args+=("$arg") ;;
+        esac
+    done
+
+    cmd="${args[0]:-help}"
+    args=("${args[@]:1}")
+
+    gitscan_utils_check_deps
+
+    case "$cmd" in
+        mirror)  gitscan_mirror_run "${args[@]}" ;;
+        scan)    gitscan_scan_run "${args[@]}" ;;
+        extract) gitscan_extract_run "${args[@]}" ;;
+        report)  gitscan_report_run "${args[@]}" ;;
+        clean)   gitscan_clean_run "${args[@]}" ;;
+        run)     gitscan_run_all "${args[@]}" ;;
+        --help|-h|help) gitscan_utils_usage ;;
+        *)
+            gitscan_utils_error "Unknown command: $cmd"
+            gitscan_utils_usage
+            exit 1
+            ;;
+    esac
+}
+
+gitscan_run_all() {
+    local url work_dir
+    url="${1:-}"
+    work_dir="${2:-}"
+
+    [ -z "$url" ] && {
+        gitscan_utils_error "Usage: gitscan run <url> [work-dir]"
+        exit 1
+    }
+
+    gitscan_mirror_run "$url" "$work_dir"
+    gitscan_scan_run "$work_dir"
+    gitscan_extract_run "$work_dir"
+    gitscan_report_run "$work_dir"
+    gitscan_clean_run "$work_dir"
+}
+
+# @section_code: SC007
+# @section_name: source
+# @source_index: 2
+# @source_file: src/utils.sh
+# @portion_type: module
+
+GITSCAN_VERSION="0.1.0"
+GITSCAN_BACKUP_DONE=0
+GITSCAN_NO_BACKUP=0
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+gitscan_utils_log() {
+    local level msg
+    level="$1"
+    msg="$2"
+    echo "[$(date '+%H:%M:%S')] [$level] $msg" >&2
+}
+
+gitscan_utils_info()  { gitscan_utils_log "INFO" "$1"; }
+gitscan_utils_warn()  { gitscan_utils_log "WARN" "$1"; }
+gitscan_utils_error() { gitscan_utils_log "ERROR" "$1"; }
+
+# ---------------------------------------------------------------------------
+# Dependency check
+# ---------------------------------------------------------------------------
+
+gitscan_utils_check_deps() {
+    local dep
+    for dep in git; do
+        if ! command -v "$dep" >/dev/null 2>&1; then
+            gitscan_utils_error "Required dependency not found: $dep"
+            exit 1
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Usage
+# ---------------------------------------------------------------------------
+
+gitscan_utils_usage() {
+    cat <<EOF
+gitscan v${GITSCAN_VERSION} - Git history scanner for sensitive data
+
+USAGE:
+    gitscan [--no-backup] <command> [options]
+
+COMMANDS:
+    mirror <url> [work-dir]    Clone repository as local mirror
+    scan [work-dir]            Scan history for sensitive data
+    extract [work-dir]         Extract suspicious file contents
+    report [work-dir]          Generate findings report
+    clean [work-dir]           Generate git-filter-repo cleanup script
+    run <url> [work-dir]       Run all steps in sequence
+
+GLOBAL FLAGS:
+    --no-backup                Skip safety backup (use with care)
+    --help, -h                 Show this help
+
+WORK DIR:
+    If omitted or '.', \$PWD is used.
+    Relative paths are resolved from \$PWD.
+    The work dir can be:
+      a) A bare git repo itself   → gitscan uses it directly as the mirror
+      b) A directory containing a mirror/ bare repo (standard layout)
+      c) Any directory with a bare repo subdir (non-standard mirror name)
+    Outputs (findings.tsv, report.txt, ...) are placed in the work dir.
+
+BACKUP:
+    Before every action gitscan creates a safety backup in:
+      ~/.gitscan/backups/<repo>_<timestamp>/
+    If a valid backup already exists for that repo it is reused — no
+    redundant clones. Use --no-backup to skip.
+
+EXAMPLES:
+    gitscan run https://github.com/user/repo
+    gitscan mirror https://github.com/user/repo ./workspace
+    cd ./workspace/mirror && gitscan scan
+    gitscan scan .                       # from inside the bare mirror dir
+    gitscan --no-backup scan ./workspace
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Path resolution
+# ---------------------------------------------------------------------------
+
+# Resolve a work-dir CLI argument to an absolute path.
+# Empty or '.' → $PWD; relative → $PWD/<arg>; absolute → unchanged.
+gitscan_utils_resolve_workdir() {
+    local arg path
+    arg="${1:-}"
+
+    if [ -z "$arg" ] || [ "$arg" = "." ]; then
+        path="$PWD"
+    else
+        case "$arg" in
+            /*) path="$arg" ;;
+            *)  path="${PWD}/${arg}" ;;
+        esac
+    fi
+
+    echo "$path"
+}
+
+# Locate the mirror bare repo given a work dir. Resolution order:
+#   1. work_dir itself is a bare git repo  → use it directly
+#   2. work_dir/mirror is a bare git repo  → standard layout
+#   3. any immediate subdir is a bare repo → non-standard mirror name
+#   4. fallback: work_dir/mirror           → used for error messages / first clone
+gitscan_utils_mirror_dir() {
+    local work_dir candidate subdir
+    work_dir="$1"
+
+    # 1. work_dir IS the mirror
+    if git --git-dir="$work_dir" rev-parse --git-dir >/dev/null 2>&1; then
+        echo "$work_dir"
+        return 0
+    fi
+
+    # 2. Standard: work_dir/mirror
+    candidate="${work_dir}/mirror"
+    if [ -d "$candidate" ] && \
+       git --git-dir="$candidate" rev-parse --git-dir >/dev/null 2>&1; then
+        echo "$candidate"
+        return 0
+    fi
+
+    # 3. Any bare repo subdir (non-standard mirror name)
+    if [ -d "$work_dir" ]; then
+        for subdir in "${work_dir}"/*/; do
+            subdir="${subdir%/}"
+            [ -d "$subdir" ] || continue
+            if git --git-dir="$subdir" rev-parse --git-dir >/dev/null 2>&1; then
+                echo "$subdir"
+                return 0
+            fi
+        done
+    fi
+
+    # 4. Fallback
+    echo "${work_dir}/mirror"
+}
+
+# ---------------------------------------------------------------------------
+# Mirror validation
+# ---------------------------------------------------------------------------
+
+gitscan_utils_verify_mirror() {
+    local work_dir mirror_dir
+    work_dir="$1"
+    mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
+
+    if ! git --git-dir="$mirror_dir" rev-parse --git-dir >/dev/null 2>&1; then
+        gitscan_utils_error "No valid git mirror found in '$work_dir'"
+        echo "" >&2
+        echo "  Tip: to create a mirror run:" >&2
+        echo "    gitscan mirror <repo-url> $work_dir" >&2
+        echo "" >&2
+        echo "  Or clone manually and then enter the directory:" >&2
+        echo "    git clone --mirror <repo-url> ${work_dir}/mirror" >&2
+        echo "    cd ${work_dir}/mirror && gitscan scan" >&2
+        return 1
+    fi
+
+    if ! git --git-dir="$mirror_dir" config --get remote.origin.mirror >/dev/null 2>&1; then
+        gitscan_utils_warn "'$mirror_dir' is a bare repo but not a proper mirror clone"
+        gitscan_utils_warn "For full history coverage use: gitscan mirror <repo-url> $work_dir"
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Backup
+# ---------------------------------------------------------------------------
+
+# Create a safety backup in ~/.gitscan/backups/ unless:
+#   a) --no-backup flag  (GITSCAN_NO_BACKUP=1)
+#   b) a valid, integrity-verified backup already exists for this repo
+#   c) a backup was already created in this process (GITSCAN_BACKUP_DONE=1)
+gitscan_utils_backup_if_needed() {
+    local mirror_dir
+    mirror_dir="$1"
+
+    if [ "${GITSCAN_NO_BACKUP:-0}" = "1" ]; then
+        gitscan_utils_info "Backup skipped (--no-backup)"
+        return 0
+    fi
+
+    # Fast path: already done in this session
+    [ "${GITSCAN_BACKUP_DONE:-0}" = "1" ] && return 0
+
+    local remote_url slug
+    remote_url="$(git --git-dir="$mirror_dir" \
+        config --get remote.origin.url 2>/dev/null || true)"
+
+    if [ -z "$remote_url" ]; then
+        gitscan_utils_warn "Cannot determine remote URL — backup skipped"
+        return 0
+    fi
+
+    # Slug is based on the mirror's absolute path, not the URL,
+    # so two clones of the same repo get independent backups.
+    slug="$(gitscan_utils_path_slug "$mirror_dir")"
+
+    # Persistent check: reuse any existing valid backup for this mirror path
+    local backup_base existing
+    backup_base="${HOME}/.gitscan/backups"
+    if [ -d "$backup_base" ]; then
+        for existing in "${backup_base}/${slug}_"*/; do
+            existing="${existing%/}"
+            [ -d "$existing" ] || continue
+            if git --git-dir="$existing" rev-parse --git-dir >/dev/null 2>&1; then
+                gitscan_utils_info "Backup verified at $existing — skipping new backup"
+                GITSCAN_BACKUP_DONE=1
+                return 0
+            fi
+        done
+    fi
+
+    # No valid backup found: create one now
+    gitscan_utils_backup "$mirror_dir" "$remote_url" "$slug"
+    GITSCAN_BACKUP_DONE=1
+}
+
+gitscan_utils_backup() {
+    local mirror_dir remote_url slug timestamp backup_dir
+    mirror_dir="$1"
+    remote_url="$2"
+    slug="$3"
+    timestamp="$(date '+%Y%m%d_%H%M%S')"
+    backup_dir="${HOME}/.gitscan/backups/${slug}_${timestamp}"
+
+    gitscan_utils_info "Creating safety backup at $backup_dir ..."
+    mkdir -p "${HOME}/.gitscan/backups"
+    git clone --mirror "$remote_url" "$backup_dir"
+    gitscan_utils_info "Backup ready: $backup_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Path slug: /home/pippo/dev/proj → home-pippo-dev-proj
+# ---------------------------------------------------------------------------
+
+gitscan_utils_path_slug() {
+    local path
+    path="$1"
+    echo "$path" | sed 's|^/||; s|/|-|g'
+}
+
+# ---------------------------------------------------------------------------
+# Output path helpers
+# ---------------------------------------------------------------------------
+
+# findings.tsv and report.txt live in ~/.gitscan/reports/, named after the
+# mirror's absolute path so different repos never collide.
+# Pass mirror_dir as argument.
+
+gitscan_utils_findings_file() {
+    local mirror_dir slug
+    mirror_dir="$1"
+    slug="$(gitscan_utils_path_slug "$mirror_dir")"
+    echo "${HOME}/.gitscan/reports/${slug}.tsv"
+}
+
+gitscan_utils_report_file() {
+    local mirror_dir slug
+    mirror_dir="$1"
+    slug="$(gitscan_utils_path_slug "$mirror_dir")"
+    echo "${HOME}/.gitscan/reports/${slug}.txt"
+}
+
+# extracted/ and cleanup.sh stay in the work dir (local, potentially large).
+
+gitscan_utils_extracted_dir() {
+    local work_dir
+    work_dir="$1"
+    echo "${work_dir}/extracted"
+}
+
+gitscan_utils_cleanup_script() {
+    local work_dir
+    work_dir="$1"
+    echo "${work_dir}/cleanup.sh"
+}
+
+# @section_code: SC007
+# @section_name: source
+# @source_index: 3
+# @source_file: src/mirror.sh
+# @portion_type: module
+
+gitscan_mirror_run() {
+    local url work_dir mirror_dir
+    url="${1:-}"
+    work_dir="$(gitscan_utils_resolve_workdir "${2:-}")"
+
+    [ -z "$url" ] && {
+        gitscan_utils_error "Usage: gitscan mirror <url> [work-dir]"
+        exit 1
+    }
+
+    mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
+
+    mkdir -p "$work_dir"
+    mkdir -p "$(gitscan_utils_extracted_dir "$work_dir")"
+
+    if [ -d "$mirror_dir" ] && \
+       git --git-dir="$mirror_dir" rev-parse --git-dir >/dev/null 2>&1; then
+        # Existing mirror: backup before updating
+        gitscan_utils_backup_if_needed "$mirror_dir"
+        gitscan_utils_info "Updating mirror at $mirror_dir ..."
+        git --git-dir="$mirror_dir" remote update --prune
+    else
+        gitscan_utils_info "Cloning $url as mirror to $mirror_dir ..."
+        git clone --mirror "$url" "$mirror_dir"
+    fi
+
+    gitscan_utils_info "Mirror ready at $mirror_dir"
+}
+
+# @section_code: SC007
+# @section_name: source
+# @source_index: 4
+# @source_file: src/scan.sh
+# @portion_type: module
+
+# ---------------------------------------------------------------------------
+# Default path patterns (glob-style, matched against filename and full path)
+# ---------------------------------------------------------------------------
+GITSCAN_PATH_PATTERNS=(
+    "*.pem" "*.key" "*.p12" "*.pfx" "*.pkcs12"
+    "*.jks" "*.keystore" "*.ppk" "*.cert" "*.crt"
+    "id_rsa" "id_dsa" "id_ecdsa" "id_ed25519"
+    ".env" ".env.local" ".env.production" ".env.development" ".env.staging"
+    "credentials" "credentials.json" "credentials.csv"
+    "secrets.json" "secrets.yaml" "secrets.yml" "secrets.xml"
+    ".netrc" ".pgpass" "htpasswd" ".htpasswd" "shadow"
+)
+
+# ---------------------------------------------------------------------------
+# IPv4 detection
+# ---------------------------------------------------------------------------
+GITSCAN_IP_PATTERN='([0-9]{1,3}\.){3}[0-9]{1,3}'
+
+# IPs in this list are never reported (additive — user additions are appended).
+GITSCAN_IP_EXCEPTIONS=(
+    "0.0.0.0"
+    "127.0.0.1"
+    "127.0.1.1"
+    "255.255.255.255"
+)
+
+# ---------------------------------------------------------------------------
+# Default content patterns (ERE, used with git log -G and grep -E)
+# ---------------------------------------------------------------------------
+GITSCAN_CONTENT_PATTERNS=(
+    "-----BEGIN RSA PRIVATE KEY-----"
+    "-----BEGIN DSA PRIVATE KEY-----"
+    "-----BEGIN EC PRIVATE KEY-----"
+    "-----BEGIN OPENSSH PRIVATE KEY-----"
+    "-----BEGIN PRIVATE KEY-----"
+    "AKIA[0-9A-Z]{16}"
+    "(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}"
+    "github_pat_[0-9A-Za-z_]{82}"
+    "xox[baprs]-[0-9a-zA-Z-]{10,48}"
+    "AIza[0-9A-Za-z_-]{35}"
+    "AWS_SECRET_ACCESS_KEY[[:space:]]*=[[:space:]]*[A-Za-z0-9/+]{40}"
+    "SG\\.[0-9A-Za-z_-]{22}\\.[0-9A-Za-z_-]{43}"
+)
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+gitscan_scan_run() {
+    local work_dir mirror_dir findings_file patterns_file
+    work_dir="$(gitscan_utils_resolve_workdir "${1:-}")"
+    mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
+    findings_file="$(gitscan_utils_findings_file "$mirror_dir")"
+    patterns_file="${work_dir}/patterns.txt"
+
+    gitscan_utils_verify_mirror "$work_dir" || exit 1
+    gitscan_utils_backup_if_needed "$mirror_dir"
+    mkdir -p "${HOME}/.gitscan/reports"
+
+    # Load custom patterns if file exists
+    if [ -f "$patterns_file" ]; then
+        gitscan_utils_info "Loading patterns from $patterns_file"
+        gitscan_scan_load_patterns "$patterns_file"
+    fi
+
+    gitscan_utils_info "Starting scan of $mirror_dir..."
+
+    # Write TSV header
+    printf "hash\tauthor\tdate\tfile\ttype\tpattern\n" > "$findings_file"
+
+    gitscan_utils_info "Scanning file paths..."
+    gitscan_scan_paths "$mirror_dir" "$findings_file"
+
+    gitscan_utils_info "Scanning file content..."
+    gitscan_scan_content "$mirror_dir" "$findings_file"
+
+    gitscan_utils_info "Scanning for IP addresses..."
+    gitscan_scan_ips "$mirror_dir" "$findings_file"
+
+    local count
+    count=$(tail -n +2 "$findings_file" | wc -l | tr -d ' ')
+    gitscan_utils_info "Scan complete — $count finding(s) saved to $findings_file"
+}
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+gitscan_scan_load_patterns() {
+    local file section line
+    file="$1"
+    section=""
+
+    # paths and content are fully replaced by the custom file;
+    # ip-exceptions are appended to the built-in defaults.
+    GITSCAN_PATH_PATTERNS=()
+    GITSCAN_CONTENT_PATTERNS=()
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ""|\#*) continue ;;
+        esac
+
+        case "$line" in
+            "[paths]")         section="paths";         continue ;;
+            "[content]")       section="content";       continue ;;
+            "[ip-exceptions]") section="ip-exceptions"; continue ;;
+        esac
+
+        case "$section" in
+            paths)         GITSCAN_PATH_PATTERNS+=("$line") ;;
+            content)       GITSCAN_CONTENT_PATTERNS+=("$line") ;;
+            ip-exceptions) GITSCAN_IP_EXCEPTIONS+=("$line") ;;
+        esac
+    done < "$file"
+}
+
+gitscan_scan_record() {
+    local findings_file hash author date file type pattern
+    findings_file="$1"
+    hash="$2"
+    author="$3"
+    date="$4"
+    file="$5"
+    type="$6"
+    pattern="$7"
+
+    printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
+        "$hash" "$author" "$date" "$file" "$type" "$pattern" >> "$findings_file"
+}
+
+# Print the matched pattern name if the file path matches any path pattern.
+# Returns 0 on match, 1 otherwise.
+gitscan_scan_check_path() {
+    local filepath basename ptn
+    filepath="$1"
+    basename="$(basename "$filepath")"
+
+    for ptn in "${GITSCAN_PATH_PATTERNS[@]}"; do
+        # shellcheck disable=SC2254
+        case "$basename" in
+            $ptn) echo "$ptn"; return 0 ;;
+        esac
+        # also test the full relative path (e.g. .env.local, secrets/credentials)
+        case "$filepath" in
+            $ptn) echo "$ptn"; return 0 ;;
+        esac
+    done
+
+    return 1
+}
+
+# Scan git history for files matching sensitive path patterns.
+gitscan_scan_paths() {
+    local git_dir findings_file
+    git_dir="$1"
+    findings_file="$2"
+
+    local file
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+
+        local matched_pattern
+        if matched_pattern="$(gitscan_scan_check_path "$file")"; then
+            # Find every commit that added this file
+            local hash author date
+            while IFS='|' read -r hash author date; do
+                gitscan_scan_record "$findings_file" \
+                    "$hash" "$author" "$date" "$file" "path" "$matched_pattern"
+            done < <(git --git-dir="$git_dir" \
+                log --all --diff-filter=A --format="%H|%ae|%ai" -- "$file" 2>/dev/null)
+        fi
+    done < <(git --git-dir="$git_dir" \
+        log --all --diff-filter=A --name-only --format="" 2>/dev/null | sort -u)
+}
+
+# Returns 0 if the IP is in the exceptions list, 1 otherwise.
+gitscan_scan_is_ip_exception() {
+    local ip ex
+    ip="$1"
+    for ex in "${GITSCAN_IP_EXCEPTIONS[@]}"; do
+        [ "$ip" = "$ex" ] && return 0
+    done
+    return 1
+}
+
+# Scan git history for IPv4 addresses, skipping exceptions.
+# Each unique non-excepted IP per commit+file is recorded as a finding.
+gitscan_scan_ips() {
+    local git_dir findings_file
+    git_dir="$1"
+    findings_file="$2"
+
+    local hash author date
+    while IFS='|' read -r hash author date; do
+        local file
+        while IFS= read -r file; do
+            [ -z "$file" ] && continue
+
+            local ip
+            while IFS= read -r ip; do
+                [ -z "$ip" ] && continue
+                if ! gitscan_scan_is_ip_exception "$ip"; then
+                    gitscan_scan_record "$findings_file" \
+                        "$hash" "$author" "$date" "$file" "ip" "$ip"
+                fi
+            done < <(git --git-dir="$git_dir" \
+                show "${hash}:${file}" 2>/dev/null | \
+                grep -oE -e "$GITSCAN_IP_PATTERN" | sort -u)
+
+        done < <(git --git-dir="$git_dir" \
+            diff-tree --no-commit-id -r --diff-filter=AM --name-only \
+            "$hash" 2>/dev/null)
+
+    done < <(git --git-dir="$git_dir" \
+        log --all --format="%H|%ae|%ai" -G "$GITSCAN_IP_PATTERN" 2>/dev/null)
+}
+
+# Scan git history for files whose content matches sensitive patterns.
+gitscan_scan_content() {
+    local git_dir findings_file
+    git_dir="$1"
+    findings_file="$2"
+
+    local ptn
+    for ptn in "${GITSCAN_CONTENT_PATTERNS[@]}"; do
+        gitscan_utils_info "  pattern: ${ptn:0:50}..."
+
+        # git log -G finds commits where a diff line matches the pattern.
+        # For newly-added files every line is a diff line, so initial adds are caught.
+        local hash author date
+        while IFS='|' read -r hash author date; do
+            # For each such commit find the specific files containing the pattern
+            local file
+            while IFS= read -r file; do
+                [ -z "$file" ] && continue
+
+                if git --git-dir="$git_dir" \
+                    show "${hash}:${file}" 2>/dev/null | grep -qE -e "$ptn"; then
+
+                    gitscan_scan_record "$findings_file" \
+                        "$hash" "$author" "$date" "$file" "content" "$ptn"
+                fi
+            done < <(git --git-dir="$git_dir" \
+                diff-tree --no-commit-id -r --diff-filter=AM --name-only \
+                "$hash" 2>/dev/null)
+
+        done < <(git --git-dir="$git_dir" \
+            log --all --format="%H|%ae|%ai" -G "$ptn" 2>/dev/null)
+    done
+}
+
+# @section_code: SC007
+# @section_name: source
+# @source_index: 5
+# @source_file: src/extract.sh
+# @portion_type: module
+
+gitscan_extract_run() {
+    local work_dir mirror_dir findings_file extracted_dir
+    work_dir="$(gitscan_utils_resolve_workdir "${1:-}")"
+    mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
+    findings_file="$(gitscan_utils_findings_file "$mirror_dir")"
+    extracted_dir="$(gitscan_utils_extracted_dir "$work_dir")"
+
+    gitscan_utils_verify_mirror "$work_dir" || exit 1
+    gitscan_utils_backup_if_needed "$mirror_dir"
+
+    [ ! -f "$findings_file" ] && {
+        gitscan_utils_error "Findings not found at $findings_file. Run 'gitscan scan' first."
+        exit 1
+    }
+
+    mkdir -p "$extracted_dir"
+
+    local extracted count
+    extracted=0
+    count=0
+
+    local hash author date file type pattern
+    while IFS=$'\t' read -r hash author date file type pattern; do
+        # skip TSV header
+        [ "$hash" = "hash" ] && continue
+
+        count=$((count + 1))
+
+        local out_file out_dir short_hash
+        short_hash="${hash:0:12}"
+        out_dir="${extracted_dir}/${short_hash}/$(dirname "$file")"
+        out_file="${extracted_dir}/${short_hash}/${file}"
+
+        mkdir -p "$out_dir"
+
+        if git --git-dir="$mirror_dir" show "${hash}:${file}" \
+            > "$out_file" 2>/dev/null; then
+            extracted=$((extracted + 1))
+            gitscan_utils_info "  Extracted ${short_hash}:${file}"
+        else
+            gitscan_utils_warn "  Could not extract ${short_hash}:${file} (may have been deleted)"
+        fi
+    done < "$findings_file"
+
+    gitscan_utils_info "Extracted $extracted/$count file(s) to $extracted_dir"
+}
+
+# @section_code: SC007
+# @section_name: source
+# @source_index: 6
+# @source_file: src/report.sh
+# @portion_type: module
+
+gitscan_report_run() {
+    local work_dir mirror_dir findings_file report_file
+    work_dir="$(gitscan_utils_resolve_workdir "${1:-}")"
+    mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
+    findings_file="$(gitscan_utils_findings_file "$mirror_dir")"
+    report_file="$(gitscan_utils_report_file "$mirror_dir")"
+
+    gitscan_utils_verify_mirror "$work_dir" || exit 1
+    gitscan_utils_backup_if_needed "$mirror_dir"
+    mkdir -p "${HOME}/.gitscan/reports"
+
+    [ ! -f "$findings_file" ] && {
+        gitscan_utils_error "Findings not found at $findings_file. Run 'gitscan scan' first."
+        exit 1
+    }
+
+    gitscan_report_generate "$findings_file" "$report_file"
+
+    cat "$report_file"
+    gitscan_utils_info "Report saved to $report_file"
+}
+
+gitscan_report_generate() {
+    local findings_file report_file
+    findings_file="$1"
+    report_file="$2"
+
+    local total unique_files unique_commits unique_authors path_count content_count
+    total=$(tail -n +2 "$findings_file" | wc -l | tr -d ' ')
+    unique_files=$(tail -n +2 "$findings_file" | cut -f4 | sort -u | wc -l | tr -d ' ')
+    unique_commits=$(tail -n +2 "$findings_file" | cut -f1 | sort -u | wc -l | tr -d ' ')
+    unique_authors=$(tail -n +2 "$findings_file" | cut -f2 | sort -u | wc -l | tr -d ' ')
+    path_count=$(tail -n +2 "$findings_file" | awk -F'\t' '$5=="path"' | wc -l | tr -d ' ')
+    content_count=$(tail -n +2 "$findings_file" | awk -F'\t' '$5=="content"' | wc -l | tr -d ' ')
+
+    {
+        echo "======================================================"
+        echo "  GITSCAN — SECURITY REPORT"
+        echo "  Generated: $(date)"
+        echo "======================================================"
+        echo ""
+        echo "SUMMARY"
+        echo "-------"
+        printf "  Total findings:    %s\n" "$total"
+        printf "  Unique files:      %s\n" "$unique_files"
+        printf "  Commits affected:  %s\n" "$unique_commits"
+        printf "  Authors involved:  %s\n" "$unique_authors"
+        echo ""
+        echo "FINDINGS BY TYPE"
+        echo "----------------"
+        printf "  Path matches:      %s\n" "$path_count"
+        printf "  Content matches:   %s\n" "$content_count"
+        echo ""
+
+        echo "TOP PATTERNS"
+        echo "------------"
+        tail -n +2 "$findings_file" | cut -f6 | sort | uniq -c | sort -rn | head -10 | \
+            while read -r cnt ptn; do
+                printf "  (%s) %s\n" "$cnt" "$ptn"
+            done
+        echo ""
+
+        echo "AFFECTED FILES"
+        echo "--------------"
+        tail -n +2 "$findings_file" | cut -f4 | sort | uniq -c | sort -rn | \
+            while read -r cnt file; do
+                printf "  (%s) %s\n" "$cnt" "$file"
+            done
+        echo ""
+
+        echo "AFFECTED AUTHORS"
+        echo "----------------"
+        tail -n +2 "$findings_file" | cut -f2 | sort | uniq -c | sort -rn | \
+            while read -r cnt author; do
+                printf "  (%s) %s\n" "$cnt" "$author"
+            done
+        echo ""
+
+        echo "DETAILED FINDINGS"
+        echo "-----------------"
+        local hash author date file type pattern
+        while IFS=$'\t' read -r hash author date file type pattern; do
+            printf "  commit:  %s\n" "${hash:0:12}"
+            printf "  author:  %s\n" "$author"
+            printf "  date:    %s\n" "$date"
+            printf "  file:    %s\n" "$file"
+            printf "  type:    %s\n" "$type"
+            printf "  pattern: %s\n" "$pattern"
+            echo "  ---"
+        done < <(tail -n +2 "$findings_file")
+
+    } > "$report_file"
+}
+
+# @section_code: SC007
+# @section_name: source
+# @source_index: 7
+# @source_file: src/clean.sh
+# @portion_type: module
+
+gitscan_clean_run() {
+    local work_dir findings_file cleanup_script mirror_dir
+    work_dir="$(gitscan_utils_resolve_workdir "${1:-}")"
+    mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
+    findings_file="$(gitscan_utils_findings_file "$mirror_dir")"
+    cleanup_script="$(gitscan_utils_cleanup_script "$work_dir")"
+
+    gitscan_utils_verify_mirror "$work_dir" || exit 1
+    gitscan_utils_backup_if_needed "$mirror_dir"
+
+    [ ! -f "$findings_file" ] && {
+        gitscan_utils_error "Findings not found at $findings_file. Run 'gitscan scan' first."
+        exit 1
+    }
+
+    local finding_count
+    finding_count=$(tail -n +2 "$findings_file" | wc -l | tr -d ' ')
+
+    if [ "$finding_count" -eq 0 ]; then
+        gitscan_utils_info "No findings — nothing to clean up."
+        return 0
+    fi
+
+    gitscan_clean_generate "$mirror_dir" "$findings_file" "$cleanup_script"
+
+    gitscan_utils_info "Cleanup script generated at $cleanup_script"
+    echo ""
+    echo "  Review the script before running:"
+    echo "    cat $cleanup_script"
+    echo ""
+    echo "  To execute (IRREVERSIBLE — rewrites git history):"
+    echo "    bash $cleanup_script"
+    echo ""
+    echo "  After running, force-push all branches and tags:"
+    echo "    git push --force --all && git push --force --tags"
+    echo ""
+    echo "  Notify all collaborators to re-clone the repository."
+}
+
+gitscan_clean_generate() {
+    local mirror_dir findings_file cleanup_script
+    mirror_dir="$1"
+    findings_file="$2"
+    cleanup_script="$3"
+
+    local mirror_abs
+    mirror_abs="$(cd "$mirror_dir" 2>/dev/null && pwd || echo "$mirror_dir")"
+
+    # Collect unique file paths from findings
+    local files_list
+    files_list="$(tail -n +2 "$findings_file" | cut -f4 | sort -u)"
+
+    local file_count
+    file_count="$(echo "$files_list" | wc -l | tr -d ' ')"
+
+    {
+        echo "#!/usr/bin/env bash"
+        echo "# ============================================================"
+        echo "# GITSCAN — Cleanup Script"
+        echo "# Generated: $(date)"
+        echo "#"
+        echo "# WARNING: This script rewrites git history using git-filter-repo."
+        echo "# It is IRREVERSIBLE. Always keep a backup mirror."
+        echo "# All collaborators must re-clone after running."
+        echo "# ============================================================"
+        echo ""
+        echo "set -euo pipefail"
+        echo ""
+        echo "MIRROR_DIR=\"${mirror_abs}\""
+        echo ""
+        echo "# ---- Files to remove from history ($file_count unique path(s)) ----"
+        echo "$files_list" | while IFS= read -r f; do
+            echo "# $f"
+        done
+        echo ""
+        echo "# Verify git-filter-repo is installed"
+        echo "if ! command -v git-filter-repo >/dev/null 2>&1; then"
+        echo "    echo 'ERROR: git-filter-repo not found. Install it and retry.' >&2"
+        echo "    exit 1"
+        echo "fi"
+        echo ""
+        echo "# Write paths to a temp file"
+        echo "PATHS_FILE=\"\$(mktemp)\""
+        echo "trap 'rm -f \"\$PATHS_FILE\"' EXIT"
+        echo ""
+        echo "cat > \"\$PATHS_FILE\" <<'PATHS_EOF'"
+        echo "$files_list"
+        echo "PATHS_EOF"
+        echo ""
+        echo "cd \"\$MIRROR_DIR\""
+        echo ""
+        echo "echo \"Removing sensitive files from history...\""
+        echo "git-filter-repo --paths-from-file \"\$PATHS_FILE\" --invert-paths --force"
+        echo ""
+        echo "echo \"Running garbage collection...\""
+        echo "git reflog expire --expire=now --all"
+        echo "git gc --prune=now --aggressive"
+        echo ""
+        echo "echo \"Done. Force-push with:\""
+        echo "echo \"  git push --force --all && git push --force --tags\""
+        echo "echo \"All collaborators must re-clone the repository.\""
+    } > "$cleanup_script"
+
+    chmod +x "$cleanup_script"
+}
+
+# @section_code: SC006
+# @section_name: entrypoint
+main "$@"
