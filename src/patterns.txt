@@ -44,6 +44,7 @@ shadow
 -----BEGIN EC PRIVATE KEY-----
 -----BEGIN OPENSSH PRIVATE KEY-----
 -----BEGIN PRIVATE KEY-----
+(^|[^[:xdigit:]])[[:xdigit:]]{24}([^[:xdigit:]]|$)
 AKIA[0-9A-Z]{16}
 (ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}
 github_pat_[0-9A-Za-z_]{82}

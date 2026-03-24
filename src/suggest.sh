@@ -74,6 +74,31 @@ gitscan_suggest_run() {
             done
     fi
 
+    # ── HASHES TO MASK ─────────────────────────────────────────────────────
+
+    local hash_count
+    hash_count="$(tail -n +2 "$findings_file" | \
+        awk -F'\t' '$5=="hash"' | cut -f6 | sort -u | wc -l | tr -d ' ')"
+
+    if [ "$hash_count" -gt 0 ]; then
+        echo "── HASHES TO MASK ($hash_count unique hash(es)) ──────────────────"
+        echo "   These hashes will be replaced with same-length X placeholders."
+        echo ""
+
+        local found_hash
+        while IFS= read -r found_hash; do
+            echo "  gitscan mask-hash \"$found_hash\""
+
+            local files
+            files="$(tail -n +2 "$findings_file" | \
+                awk -F'\t' -v found_hash="$found_hash" '$5=="hash" && $6==found_hash {print $4}' | \
+                sort -u | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')"
+            echo "    ↳ found in: $files"
+            echo ""
+        done < <(tail -n +2 "$findings_file" | \
+            awk -F'\t' '$5=="hash"' | cut -f6 | sort -u)
+    fi
+
     # ── IP ADDRESSES TO MASK ───────────────────────────────────────────────
 
     local ip_count
@@ -180,6 +205,51 @@ gitscan_mask_ip_run() {
     rm -f "$tmp_replacements"
 
     gitscan_utils_info "IP address masked."
+    echo ""
+    echo "  Next step: push the rewritten history to remote:"
+    echo "    gitscan push $work_dir"
+}
+
+# ---------------------------------------------------------------------------
+# mask-hash — replace a hash with same-length X placeholders across history
+# ---------------------------------------------------------------------------
+
+gitscan_mask_hash_run() {
+    local found_hash work_dir mirror_dir replacement
+    found_hash="${1:-}"
+    work_dir="$(gitscan_utils_resolve_workdir "${2:-}")"
+    mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
+
+    [ -z "$found_hash" ] && {
+        gitscan_utils_error "Usage: gitscan mask-hash <hash> [work-dir]"
+        exit 1
+    }
+
+    gitscan_utils_verify_mirror "$work_dir" || exit 1
+
+    if ! command -v git-filter-repo >/dev/null 2>&1; then
+        gitscan_utils_error "git-filter-repo is required but not installed"
+        gitscan_utils_install_hint "git-filter-repo" >&2
+        exit 1
+    fi
+
+    gitscan_utils_backup_if_needed "$mirror_dir"
+
+    replacement="$(printf '%*s' "${#found_hash}" '' | tr ' ' 'X')"
+
+    local tmp_replacements
+    tmp_replacements="$(mktemp)"
+    printf "literal:%s==>%s\n" "$found_hash" "$replacement" > "$tmp_replacements"
+
+    gitscan_utils_warn "Replacing '$found_hash' with '$replacement' in ALL files across full history — IRREVERSIBLE"
+    gitscan_utils_info "Running git-filter-repo..."
+
+    (cd "$mirror_dir" && \
+        git-filter-repo --replace-text "$tmp_replacements" --force 2>&1)
+
+    rm -f "$tmp_replacements"
+
+    gitscan_utils_info "Hash masked."
     echo ""
     echo "  Next step: push the rewritten history to remote:"
     echo "    gitscan push $work_dir"

@@ -13,7 +13,7 @@ set -e
 # @file_type: build-entrypoint
 # @build_type: bin
 # @build_with: Mush v0.2.0 (2026-03-22 develop)
-# @build_date: 2026-03-24T15:01:04Z
+# @build_date: 2026-03-24T17:30:09Z
 
 # @section_code: SC005
 # @section_name: functions
@@ -37,6 +37,7 @@ module scan
 module extract
 module report
 module clean
+module suggest
 
 inject file patterns.txt
 
@@ -60,12 +61,16 @@ main() {
     gitscan_utils_check_deps
 
     case "$cmd" in
-        mirror)  gitscan_mirror_run "${args[@]}" ;;
-        scan)    gitscan_scan_run "${args[@]}" ;;
-        extract) gitscan_extract_run "${args[@]}" ;;
-        report)  gitscan_report_run "${args[@]}" ;;
-        clean)   gitscan_clean_run "${args[@]}" ;;
-        run)     gitscan_run_all "${args[@]}" ;;
+        mirror)      gitscan_mirror_run "${args[@]}" ;;
+        scan)        gitscan_scan_run "${args[@]}" ;;
+        extract)     gitscan_extract_run "${args[@]}" ;;
+        report)      gitscan_report_run "${args[@]}" ;;
+        clean)       gitscan_clean_run "${args[@]}" ;;
+        suggest)     gitscan_suggest_run "${args[@]}" ;;
+        remove-file) gitscan_remove_file_run "${args[@]}" ;;
+        mask-ip)     gitscan_mask_ip_run "${args[@]}" ;;
+        push)        gitscan_push_run "${args[@]}" ;;
+        run)         gitscan_run_all "${args[@]}" ;;
         --help|-h|help) gitscan_utils_usage ;;
         *)
             gitscan_utils_error "Unknown command: $cmd"
@@ -121,6 +126,48 @@ gitscan_utils_error() { gitscan_utils_log "ERROR" "$1"; }
 # Dependency check
 # ---------------------------------------------------------------------------
 
+gitscan_utils_install_hint() {
+    local pkg
+    pkg="$1"
+
+    local os_id
+    os_id=""
+    if [ -f /etc/os-release ]; then
+        os_id="$(. /etc/os-release && echo "${ID_LIKE:-$ID}")"
+    fi
+
+    case "$(uname -s)" in
+        Darwin)
+            echo "  Install with Homebrew:"
+            echo "    brew install $pkg"
+            ;;
+        Linux)
+            case "$os_id" in
+                *debian*|*ubuntu*)
+                    echo "  Install with apt:"
+                    echo "    sudo apt install $pkg"
+                    ;;
+                *fedora*|*rhel*|*centos*)
+                    echo "  Install with dnf:"
+                    echo "    sudo dnf install $pkg"
+                    ;;
+                *arch*)
+                    echo "  Install with pacman:"
+                    echo "    sudo pacman -S $pkg"
+                    ;;
+                *)
+                    echo "  Install via pip (universal):"
+                    echo "    pip install $pkg"
+                    echo "  Or see: https://github.com/newren/git-filter-repo"
+                    ;;
+            esac
+            ;;
+        *)
+            echo "  See: https://github.com/newren/git-filter-repo"
+            ;;
+    esac
+}
+
 gitscan_utils_check_deps() {
     local dep
     for dep in git; do
@@ -143,12 +190,16 @@ USAGE:
     gitscan [--no-backup] <command> [options]
 
 COMMANDS:
-    mirror <url> [work-dir]    Clone repository as local mirror
-    scan [work-dir]            Scan history for sensitive data
-    extract [work-dir]         Extract suspicious file contents
-    report [work-dir]          Generate findings report
-    clean [work-dir]           Generate git-filter-repo cleanup script
-    run <url> [work-dir]       Run all steps in sequence
+    mirror <url> [work-dir]         Clone repository as local mirror
+    scan [work-dir]                 Scan history for sensitive data
+    extract [work-dir]              Extract suspicious file contents
+    report [work-dir]               Generate findings report
+    suggest [work-dir]              Show remediation suggestions
+    remove-file <file> [work-dir]   Remove a file from all git history
+    mask-ip <ip> [work-dir]         Replace an IP with X.X.X.X in all history
+    push [work-dir]                 Force-push rewritten history to remote
+    clean [work-dir]                Generate git-filter-repo cleanup script
+    run <url> [work-dir]            Run all steps in sequence
 
 GLOBAL FLAGS:
     --no-backup                Skip safety backup (use with care)
@@ -457,6 +508,7 @@ GITSCAN_CONTENT_PATTERNS=(
     "-----BEGIN EC PRIVATE KEY-----"
     "-----BEGIN OPENSSH PRIVATE KEY-----"
     "-----BEGIN PRIVATE KEY-----"
+    "(^|[^[:xdigit:]])[[:xdigit:]]{24}([^[:xdigit:]]|$)"
     "AKIA[0-9A-Z]{16}"
     "(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}"
     "github_pat_[0-9A-Za-z_]{82}"
@@ -937,6 +989,270 @@ gitscan_clean_generate() {
     } > "$cleanup_script"
 
     chmod +x "$cleanup_script"
+}
+
+# @section_code: SC007
+# @section_name: source
+# @source_index: 8
+# @source_file: src/suggest.sh
+# @portion_type: module
+
+# ---------------------------------------------------------------------------
+# suggest — reads findings and prints actionable remediation commands
+# ---------------------------------------------------------------------------
+
+gitscan_suggest_run() {
+    local work_dir mirror_dir findings_file
+    work_dir="$(gitscan_utils_resolve_workdir "${1:-}")"
+    mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
+    findings_file="$(gitscan_utils_findings_file "$mirror_dir")"
+
+    gitscan_utils_verify_mirror "$work_dir" || exit 1
+
+    [ ! -f "$findings_file" ] && {
+        gitscan_utils_error "No findings file at $findings_file. Run 'gitscan scan' first."
+        exit 1
+    }
+
+    local total
+    total="$(tail -n +2 "$findings_file" | wc -l | tr -d ' ')"
+
+    if [ "$total" -eq 0 ]; then
+        echo "No findings — nothing to suggest."
+        return 0
+    fi
+
+    echo "======================================================"
+    echo "  GITSCAN — SUGGESTIONS"
+    echo "======================================================"
+    echo ""
+    echo "  Mirror: $mirror_dir"
+    echo "  Run commands from inside the mirror directory."
+    echo ""
+
+    # ── FILES TO REMOVE (path + content findings) ──────────────────────────
+
+    local file_count
+    file_count="$(tail -n +2 "$findings_file" | \
+        awk -F'\t' '$5=="path" || $5=="content"' | \
+        cut -f4 | sort -u | wc -l | tr -d ' ')"
+
+    if [ "$file_count" -gt 0 ]; then
+        echo "── FILES TO REMOVE ($file_count unique file(s)) ──────────────────"
+        echo "   These files must be purged from the full git history."
+        echo ""
+
+        # For each unique file: collect all distinct reasons
+        tail -n +2 "$findings_file" | \
+            awk -F'\t' '$5=="path" || $5=="content" {print $4 "\t" $5 "\t" $6}' | \
+            sort -u | \
+            awk -F'\t' '
+                {
+                    if ($1 != prev) {
+                        if (prev != "") print "---"
+                        print "FILE\t" $1
+                        prev = $1
+                    }
+                    print "REASON\t" $2 ": " $3
+                }
+                END { if (prev != "") print "---" }
+            ' | \
+            while IFS=$'\t' read -r tag value; do
+                case "$tag" in
+                    FILE)
+                        echo "  gitscan remove-file \"$value\""
+                        ;;
+                    REASON)
+                        echo "    ↳ $value"
+                        ;;
+                    ---)
+                        echo ""
+                        ;;
+                esac
+            done
+    fi
+
+    # ── IP ADDRESSES TO MASK ───────────────────────────────────────────────
+
+    local ip_count
+    ip_count="$(tail -n +2 "$findings_file" | \
+        awk -F'\t' '$5=="ip"' | cut -f6 | sort -u | wc -l | tr -d ' ')"
+
+    if [ "$ip_count" -gt 0 ]; then
+        echo "── IP ADDRESSES TO MASK ($ip_count unique IP(s)) ──────────────────"
+        echo "   These IPs will be replaced with X.X.X.X across ALL history."
+        echo ""
+
+        local ip
+        while IFS= read -r ip; do
+            echo "  gitscan mask-ip \"$ip\""
+
+            # List files where this IP appears (deduplicated)
+            local files
+            files="$(tail -n +2 "$findings_file" | \
+                awk -F'\t' -v ip="$ip" '$5=="ip" && $6==ip {print $4}' | \
+                sort -u | tr '\n' ',' | sed 's/,$//' | sed 's/,/, /g')"
+            echo "    ↳ found in: $files"
+            echo ""
+        done < <(tail -n +2 "$findings_file" | \
+            awk -F'\t' '$5=="ip"' | cut -f6 | sort -u)
+    fi
+
+    echo "NOTE: All these commands rewrite git history."
+    echo "      After running, force-push and ask collaborators to re-clone."
+}
+
+# ---------------------------------------------------------------------------
+# remove-file — purge a file from all git history via git-filter-repo
+# ---------------------------------------------------------------------------
+
+gitscan_remove_file_run() {
+    local file work_dir mirror_dir
+    file="${1:-}"
+    work_dir="$(gitscan_utils_resolve_workdir "${2:-}")"
+    mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
+
+    [ -z "$file" ] && {
+        gitscan_utils_error "Usage: gitscan remove-file <file-path> [work-dir]"
+        exit 1
+    }
+
+    gitscan_utils_verify_mirror "$work_dir" || exit 1
+
+    if ! command -v git-filter-repo >/dev/null 2>&1; then
+        gitscan_utils_error "git-filter-repo is required but not installed"
+        gitscan_utils_install_hint "git-filter-repo" >&2
+        exit 1
+    fi
+
+    gitscan_utils_backup_if_needed "$mirror_dir"
+
+    gitscan_utils_warn "Removing '$file' from the full git history — IRREVERSIBLE"
+    gitscan_utils_info "Running git-filter-repo..."
+
+    (cd "$mirror_dir" && \
+        git-filter-repo --path "$file" --invert-paths --force 2>&1)
+
+    gitscan_utils_info "File removed from history."
+    echo ""
+    echo "  Next step: push the rewritten history to remote:"
+    echo "    gitscan push $work_dir"
+}
+
+# ---------------------------------------------------------------------------
+# mask-ip — replace an IP address with X.X.X.X across all git history
+# ---------------------------------------------------------------------------
+
+gitscan_mask_ip_run() {
+    local ip work_dir mirror_dir
+    ip="${1:-}"
+    work_dir="$(gitscan_utils_resolve_workdir "${2:-}")"
+    mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
+
+    [ -z "$ip" ] && {
+        gitscan_utils_error "Usage: gitscan mask-ip <ip-address> [work-dir]"
+        exit 1
+    }
+
+    gitscan_utils_verify_mirror "$work_dir" || exit 1
+
+    if ! command -v git-filter-repo >/dev/null 2>&1; then
+        gitscan_utils_error "git-filter-repo is required but not installed"
+        gitscan_utils_install_hint "git-filter-repo" >&2
+        exit 1
+    fi
+
+    gitscan_utils_backup_if_needed "$mirror_dir"
+
+    # Build the replacements file for git-filter-repo
+    local tmp_replacements
+    tmp_replacements="$(mktemp)"
+    printf "literal:%s==>X.X.X.X\n" "$ip" > "$tmp_replacements"
+
+    gitscan_utils_warn "Replacing '$ip' with 'X.X.X.X' in ALL files across full history — IRREVERSIBLE"
+    gitscan_utils_info "Running git-filter-repo..."
+
+    (cd "$mirror_dir" && \
+        git-filter-repo --replace-text "$tmp_replacements" --force 2>&1)
+
+    rm -f "$tmp_replacements"
+
+    gitscan_utils_info "IP address masked."
+    echo ""
+    echo "  Next step: push the rewritten history to remote:"
+    echo "    gitscan push $work_dir"
+}
+
+# ---------------------------------------------------------------------------
+# push — force-push all branches and tags to remote
+# ---------------------------------------------------------------------------
+
+gitscan_push_run() {
+    local work_dir mirror_dir
+    work_dir="$(gitscan_utils_resolve_workdir "${1:-}")"
+    mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
+
+    gitscan_utils_verify_mirror "$work_dir" || exit 1
+
+    # Read the remote URL once — used for push and for the re-clone hint.
+    local remote_url
+    remote_url="$(git --git-dir="$mirror_dir" \
+        config --get remote.origin.url 2>/dev/null || true)"
+
+    gitscan_utils_warn "Force-pushing all refs to remote — IRREVERSIBLE"
+    gitscan_utils_info "Remote: ${remote_url:-unknown}"
+
+    # Push each branch and tag individually.
+    # The repo has remote.origin.mirror=true in its config; git refuses any
+    # refspec when that flag is active.  We override it per-command with
+    # -c remote.origin.mirror=false so refspecs work, while --all / --mirror
+    # are avoided entirely (--all still conflicts, --mirror pushes read-only
+    # refs like refs/pull/* that the host rejects).
+
+    local ref pushed failed
+    pushed=0
+    failed=0
+
+    gitscan_utils_info "Pushing branches..."
+    while IFS= read -r ref; do
+        [ -z "$ref" ] && continue
+        gitscan_utils_info "  $ref"
+        if (cd "$mirror_dir" && \
+                git -c remote.origin.mirror=false push --force origin \
+                "${ref}:${ref}" 2>&1); then
+            pushed=$((pushed + 1))
+        else
+            gitscan_utils_warn "  Failed: $ref"
+            failed=$((failed + 1))
+        fi
+    done < <(git --git-dir="$mirror_dir" \
+        for-each-ref --format='%(refname)' refs/heads/ 2>/dev/null)
+
+    gitscan_utils_info "Pushing tags..."
+    while IFS= read -r ref; do
+        [ -z "$ref" ] && continue
+        gitscan_utils_info "  $ref"
+        if (cd "$mirror_dir" && \
+                git -c remote.origin.mirror=false push --force origin \
+                "${ref}:${ref}" 2>&1); then
+            pushed=$((pushed + 1))
+        else
+            gitscan_utils_warn "  Failed: $ref"
+            failed=$((failed + 1))
+        fi
+    done < <(git --git-dir="$mirror_dir" \
+        for-each-ref --format='%(refname)' refs/tags/ 2>/dev/null)
+
+    gitscan_utils_info "Pushed $pushed ref(s) — $failed failed"
+
+    gitscan_utils_info "Push complete."
+    echo ""
+    echo "  IMPORTANT: All collaborators must re-clone the repository:"
+    if [ -n "$remote_url" ]; then
+        echo "    git clone $remote_url"
+    else
+        echo "    git clone <repo-url>"
+    fi
 }
 
 # @section_code: SC006

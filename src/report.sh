@@ -26,13 +26,15 @@ gitscan_report_generate() {
     findings_file="$1"
     report_file="$2"
 
-    local total unique_files unique_commits unique_authors path_count content_count
+    local total unique_files unique_commits unique_authors path_count content_count hash_count ip_count
     total=$(tail -n +2 "$findings_file" | wc -l | tr -d ' ')
     unique_files=$(tail -n +2 "$findings_file" | cut -f4 | sort -u | wc -l | tr -d ' ')
     unique_commits=$(tail -n +2 "$findings_file" | cut -f1 | sort -u | wc -l | tr -d ' ')
     unique_authors=$(tail -n +2 "$findings_file" | cut -f2 | sort -u | wc -l | tr -d ' ')
     path_count=$(tail -n +2 "$findings_file" | awk -F'\t' '$5=="path"' | wc -l | tr -d ' ')
     content_count=$(tail -n +2 "$findings_file" | awk -F'\t' '$5=="content"' | wc -l | tr -d ' ')
+    hash_count=$(tail -n +2 "$findings_file" | awk -F'\t' '$5=="hash"' | wc -l | tr -d ' ')
+    ip_count=$(tail -n +2 "$findings_file" | awk -F'\t' '$5=="ip"' | wc -l | tr -d ' ')
 
     {
         echo "======================================================"
@@ -51,6 +53,8 @@ gitscan_report_generate() {
         echo "----------------"
         printf "  Path matches:      %s\n" "$path_count"
         printf "  Content matches:   %s\n" "$content_count"
+        printf "  Hash matches:      %s\n" "$hash_count"
+        printf "  IP matches:        %s\n" "$ip_count"
         echo ""
 
         echo "TOP PATTERNS"

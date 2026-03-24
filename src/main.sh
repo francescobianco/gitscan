@@ -37,6 +37,7 @@ main() {
         suggest)     gitscan_suggest_run "${args[@]}" ;;
         remove-file) gitscan_remove_file_run "${args[@]}" ;;
         mask-ip)     gitscan_mask_ip_run "${args[@]}" ;;
+        mask-hash)   gitscan_mask_hash_run "${args[@]}" ;;
         push)        gitscan_push_run "${args[@]}" ;;
         run)         gitscan_run_all "${args[@]}" ;;
         --help|-h|help) gitscan_utils_usage ;;

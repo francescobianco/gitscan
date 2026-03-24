@@ -93,6 +93,7 @@ COMMANDS:
     suggest [work-dir]              Show remediation suggestions
     remove-file <file> [work-dir]   Remove a file from all git history
     mask-ip <ip> [work-dir]         Replace an IP with X.X.X.X in all history
+    mask-hash <hash> [work-dir]     Replace a hash with same-length Xs in all history
     push [work-dir]                 Force-push rewritten history to remote
     clean [work-dir]                Generate git-filter-repo cleanup script
     run <url> [work-dir]            Run all steps in sequence

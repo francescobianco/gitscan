@@ -28,12 +28,15 @@ GITSCAN_IP_EXCEPTIONS=(
 # ---------------------------------------------------------------------------
 # Default content patterns (ERE, used with git log -G and grep -E)
 # ---------------------------------------------------------------------------
+GITSCAN_HASH_PATTERN="(^|[^[:xdigit:]])[[:xdigit:]]{24}([^[:xdigit:]]|$)"
+
 GITSCAN_CONTENT_PATTERNS=(
     "-----BEGIN RSA PRIVATE KEY-----"
     "-----BEGIN DSA PRIVATE KEY-----"
     "-----BEGIN EC PRIVATE KEY-----"
     "-----BEGIN OPENSSH PRIVATE KEY-----"
     "-----BEGIN PRIVATE KEY-----"
+    "$GITSCAN_HASH_PATTERN"
     "AKIA[0-9A-Z]{16}"
     "(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}"
     "github_pat_[0-9A-Za-z_]{82}"
@@ -238,9 +241,19 @@ gitscan_scan_content() {
 
                 if git --git-dir="$git_dir" \
                     show "${hash}:${file}" 2>/dev/null | grep -qE -e "$ptn"; then
-
-                    gitscan_scan_record "$findings_file" \
-                        "$hash" "$author" "$date" "$file" "content" "$ptn"
+                    if [ "$ptn" = "$GITSCAN_HASH_PATTERN" ]; then
+                        local found_hash
+                        while IFS= read -r found_hash; do
+                            [ -z "$found_hash" ] && continue
+                            gitscan_scan_record "$findings_file" \
+                                "$hash" "$author" "$date" "$file" "hash" "$found_hash"
+                        done < <(git --git-dir="$git_dir" \
+                            show "${hash}:${file}" 2>/dev/null | \
+                            grep -oE -e '[[:xdigit:]]{24}' | sort -u)
+                    else
+                        gitscan_scan_record "$findings_file" \
+                            "$hash" "$author" "$date" "$file" "content" "$ptn"
+                    fi
                 fi
             done < <(git --git-dir="$git_dir" \
                 diff-tree --no-commit-id -r --diff-filter=AM --name-only \

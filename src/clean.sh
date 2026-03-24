@@ -49,7 +49,8 @@ gitscan_clean_generate() {
 
     # Collect unique file paths from findings
     local files_list
-    files_list="$(tail -n +2 "$findings_file" | cut -f4 | sort -u)"
+    files_list="$(tail -n +2 "$findings_file" | \
+        awk -F'\t' '$5=="path" || $5=="content" {print $4}' | sort -u)"
 
     local file_count
     file_count="$(echo "$files_list" | wc -l | tr -d ' ')"
