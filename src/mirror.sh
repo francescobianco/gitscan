@@ -2,7 +2,7 @@
 gitscan_mirror_run() {
     local url work_dir mirror_dir
     url="$1"
-    work_dir="${2:-.gitscan}"
+    work_dir="$(gitscan_utils_resolve_workdir "${2:-}")"
 
     [ -z "$url" ] && {
         gitscan_utils_error "Usage: gitscan mirror <url> [work-dir]"

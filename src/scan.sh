@@ -36,15 +36,12 @@ GITSCAN_CONTENT_PATTERNS=(
 
 gitscan_scan_run() {
     local work_dir mirror_dir findings_file patterns_file
-    work_dir="${1:-.gitscan}"
+    work_dir="$(gitscan_utils_resolve_workdir "${1:-}")"
     mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
     findings_file="$(gitscan_utils_findings_file "$work_dir")"
     patterns_file="${work_dir}/patterns.txt"
 
-    [ ! -d "$mirror_dir" ] && {
-        gitscan_utils_error "Mirror not found at $mirror_dir. Run 'gitscan mirror' first."
-        exit 1
-    }
+    gitscan_utils_verify_mirror "$work_dir" || exit 1
 
     # Load custom patterns if file exists
     if [ -f "$patterns_file" ]; then

@@ -1,9 +1,11 @@
 
 gitscan_report_run() {
     local work_dir findings_file report_file
-    work_dir="${1:-.gitscan}"
+    work_dir="$(gitscan_utils_resolve_workdir "${1:-}")"
     findings_file="$(gitscan_utils_findings_file "$work_dir")"
     report_file="$(gitscan_utils_report_file "$work_dir")"
+
+    gitscan_utils_verify_mirror "$work_dir" || exit 1
 
     [ ! -f "$findings_file" ] && {
         gitscan_utils_error "Findings not found at $findings_file. Run 'gitscan scan' first."

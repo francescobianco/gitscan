@@ -1,10 +1,12 @@
 
 gitscan_extract_run() {
     local work_dir mirror_dir findings_file extracted_dir
-    work_dir="${1:-.gitscan}"
+    work_dir="$(gitscan_utils_resolve_workdir "${1:-}")"
     mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
     findings_file="$(gitscan_utils_findings_file "$work_dir")"
     extracted_dir="$(gitscan_utils_extracted_dir "$work_dir")"
+
+    gitscan_utils_verify_mirror "$work_dir" || exit 1
 
     [ ! -f "$findings_file" ] && {
         gitscan_utils_error "Findings not found at $findings_file. Run 'gitscan scan' first."
