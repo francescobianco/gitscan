@@ -123,6 +123,7 @@ gitscan_remove_file_run() {
 
     if ! command -v git-filter-repo >/dev/null 2>&1; then
         gitscan_utils_error "git-filter-repo is required but not installed"
+        gitscan_utils_install_hint "git-filter-repo" >&2
         exit 1
     fi
 
@@ -159,6 +160,7 @@ gitscan_mask_ip_run() {
 
     if ! command -v git-filter-repo >/dev/null 2>&1; then
         gitscan_utils_error "git-filter-repo is required but not installed"
+        gitscan_utils_install_hint "git-filter-repo" >&2
         exit 1
     fi
 

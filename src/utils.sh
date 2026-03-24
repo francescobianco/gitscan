@@ -22,6 +22,48 @@ gitscan_utils_error() { gitscan_utils_log "ERROR" "$1"; }
 # Dependency check
 # ---------------------------------------------------------------------------
 
+gitscan_utils_install_hint() {
+    local pkg
+    pkg="$1"
+
+    local os_id
+    os_id=""
+    if [ -f /etc/os-release ]; then
+        os_id="$(. /etc/os-release && echo "${ID_LIKE:-$ID}")"
+    fi
+
+    case "$(uname -s)" in
+        Darwin)
+            echo "  Install with Homebrew:"
+            echo "    brew install $pkg"
+            ;;
+        Linux)
+            case "$os_id" in
+                *debian*|*ubuntu*)
+                    echo "  Install with apt:"
+                    echo "    sudo apt install $pkg"
+                    ;;
+                *fedora*|*rhel*|*centos*)
+                    echo "  Install with dnf:"
+                    echo "    sudo dnf install $pkg"
+                    ;;
+                *arch*)
+                    echo "  Install with pacman:"
+                    echo "    sudo pacman -S $pkg"
+                    ;;
+                *)
+                    echo "  Install via pip (universal):"
+                    echo "    pip install $pkg"
+                    echo "  Or see: https://github.com/newren/git-filter-repo"
+                    ;;
+            esac
+            ;;
+        *)
+            echo "  See: https://github.com/newren/git-filter-repo"
+            ;;
+    esac
+}
+
 gitscan_utils_check_deps() {
     local dep
     for dep in git; do
