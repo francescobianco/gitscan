@@ -198,17 +198,43 @@ gitscan_push_run() {
 
     gitscan_utils_warn "Force-pushing all refs to remote — IRREVERSIBLE"
 
-    # Push only writable refs: branches and tags.
-    # --mirror and --all are avoided because they also push read-only
-    # host-managed refs (refs/pull/*, refs/merge-requests/*, etc.) that
-    # the remote rejects with "deny updating a hidden ref".
+    # Push each branch and tag individually.
+    # A single --mirror or wildcard refspec conflicts with the mirror push
+    # config already present in the repo, and --all triggers "deny updating
+    # a hidden ref" for refs/pull/* and similar host-managed refs.
+    # Iterating one ref at a time avoids both problems.
+
+    local ref pushed failed
+    pushed=0
+    failed=0
+
     gitscan_utils_info "Pushing branches..."
-    (cd "$mirror_dir" && \
-        git push --force origin 'refs/heads/*:refs/heads/*' 2>&1)
+    while IFS= read -r ref; do
+        [ -z "$ref" ] && continue
+        if (cd "$mirror_dir" && git push --force origin \
+                "${ref}:${ref}" 2>&1); then
+            pushed=$((pushed + 1))
+        else
+            gitscan_utils_warn "  Failed to push $ref"
+            failed=$((failed + 1))
+        fi
+    done < <(git --git-dir="$mirror_dir" \
+        for-each-ref --format='%(refname)' refs/heads/ 2>/dev/null)
 
     gitscan_utils_info "Pushing tags..."
-    (cd "$mirror_dir" && \
-        git push --force origin 'refs/tags/*:refs/tags/*' 2>&1)
+    while IFS= read -r ref; do
+        [ -z "$ref" ] && continue
+        if (cd "$mirror_dir" && git push --force origin \
+                "${ref}:${ref}" 2>&1); then
+            pushed=$((pushed + 1))
+        else
+            gitscan_utils_warn "  Failed to push $ref"
+            failed=$((failed + 1))
+        fi
+    done < <(git --git-dir="$mirror_dir" \
+        for-each-ref --format='%(refname)' refs/tags/ 2>/dev/null)
+
+    gitscan_utils_info "Pushed $pushed ref(s) — $failed failed"
 
     gitscan_utils_info "Push complete."
     echo ""
