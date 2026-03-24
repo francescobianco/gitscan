@@ -1,0 +1,50 @@
+# GITSCAN default patterns
+# Lines starting with # are comments.
+# Sections: [paths] for filename/extension globs, [content] for ERE content patterns.
+
+[paths]
+*.pem
+*.key
+*.p12
+*.pfx
+*.pkcs12
+*.jks
+*.keystore
+*.ppk
+*.cert
+*.crt
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+.env
+.env.local
+.env.production
+.env.development
+.env.staging
+credentials
+credentials.json
+credentials.csv
+secrets.json
+secrets.yaml
+secrets.yml
+secrets.xml
+.netrc
+.pgpass
+htpasswd
+.htpasswd
+shadow
+
+[content]
+-----BEGIN RSA PRIVATE KEY-----
+-----BEGIN DSA PRIVATE KEY-----
+-----BEGIN EC PRIVATE KEY-----
+-----BEGIN OPENSSH PRIVATE KEY-----
+-----BEGIN PRIVATE KEY-----
+AKIA[0-9A-Z]{16}
+(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}
+github_pat_[0-9A-Za-z_]{82}
+xox[baprs]-[0-9a-zA-Z-]{10,48}
+AIza[0-9A-Za-z_-]{35}
+AWS_SECRET_ACCESS_KEY[[:space:]]*=[[:space:]]*[A-Za-z0-9/+]{40}
+SG\.[0-9A-Za-z_-]{22}\.[0-9A-Za-z_-]{43}
