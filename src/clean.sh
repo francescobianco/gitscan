@@ -2,9 +2,9 @@
 gitscan_clean_run() {
     local work_dir findings_file cleanup_script mirror_dir
     work_dir="$(gitscan_utils_resolve_workdir "${1:-}")"
-    findings_file="$(gitscan_utils_findings_file "$work_dir")"
-    cleanup_script="$(gitscan_utils_cleanup_script "$work_dir")"
     mirror_dir="$(gitscan_utils_mirror_dir "$work_dir")"
+    findings_file="$(gitscan_utils_findings_file "$mirror_dir")"
+    cleanup_script="$(gitscan_utils_cleanup_script "$work_dir")"
 
     gitscan_utils_verify_mirror "$work_dir" || exit 1
     gitscan_utils_backup_if_needed "$mirror_dir"

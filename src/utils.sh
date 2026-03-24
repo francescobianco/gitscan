@@ -189,7 +189,7 @@ gitscan_utils_backup_if_needed() {
     # Fast path: already done in this session
     [ "${GITSCAN_BACKUP_DONE:-0}" = "1" ] && return 0
 
-    local remote_url repo_slug
+    local remote_url slug
     remote_url="$(git --git-dir="$mirror_dir" \
         config --get remote.origin.url 2>/dev/null || true)"
 
@@ -198,14 +198,15 @@ gitscan_utils_backup_if_needed() {
         return 0
     fi
 
-    repo_slug="$(echo "$remote_url" | \
-        sed 's|.*[/:]||; s|\.git$||; s|[^a-zA-Z0-9._-]|_|g')"
+    # Slug is based on the mirror's absolute path, not the URL,
+    # so two clones of the same repo get independent backups.
+    slug="$(gitscan_utils_path_slug "$mirror_dir")"
 
-    # Persistent check: reuse any existing valid backup for this repo
+    # Persistent check: reuse any existing valid backup for this mirror path
     local backup_base existing
     backup_base="${HOME}/.gitscan/backups"
     if [ -d "$backup_base" ]; then
-        for existing in "${backup_base}/${repo_slug}_"*/; do
+        for existing in "${backup_base}/${slug}_"*/; do
             existing="${existing%/}"
             [ -d "$existing" ] || continue
             if git --git-dir="$existing" rev-parse --git-dir >/dev/null 2>&1; then
@@ -217,17 +218,17 @@ gitscan_utils_backup_if_needed() {
     fi
 
     # No valid backup found: create one now
-    gitscan_utils_backup "$mirror_dir" "$remote_url" "$repo_slug"
+    gitscan_utils_backup "$mirror_dir" "$remote_url" "$slug"
     GITSCAN_BACKUP_DONE=1
 }
 
 gitscan_utils_backup() {
-    local mirror_dir remote_url repo_slug timestamp backup_dir
+    local mirror_dir remote_url slug timestamp backup_dir
     mirror_dir="$1"
     remote_url="$2"
-    repo_slug="$3"
+    slug="$3"
     timestamp="$(date '+%Y%m%d_%H%M%S')"
-    backup_dir="${HOME}/.gitscan/backups/${repo_slug}_${timestamp}"
+    backup_dir="${HOME}/.gitscan/backups/${slug}_${timestamp}"
 
     gitscan_utils_info "Creating safety backup at $backup_dir ..."
     mkdir -p "${HOME}/.gitscan/backups"
@@ -236,25 +237,43 @@ gitscan_utils_backup() {
 }
 
 # ---------------------------------------------------------------------------
+# Path slug: /home/pippo/dev/proj → home-pippo-dev-proj
+# ---------------------------------------------------------------------------
+
+gitscan_utils_path_slug() {
+    local path
+    path="$1"
+    echo "$path" | sed 's|^/||; s|/|-|g'
+}
+
+# ---------------------------------------------------------------------------
 # Output path helpers
 # ---------------------------------------------------------------------------
 
+# findings.tsv and report.txt live in ~/.gitscan/reports/, named after the
+# mirror's absolute path so different repos never collide.
+# Pass mirror_dir as argument.
+
 gitscan_utils_findings_file() {
-    local work_dir
-    work_dir="$1"
-    echo "${work_dir}/findings.tsv"
+    local mirror_dir slug
+    mirror_dir="$1"
+    slug="$(gitscan_utils_path_slug "$mirror_dir")"
+    echo "${HOME}/.gitscan/reports/${slug}.tsv"
 }
+
+gitscan_utils_report_file() {
+    local mirror_dir slug
+    mirror_dir="$1"
+    slug="$(gitscan_utils_path_slug "$mirror_dir")"
+    echo "${HOME}/.gitscan/reports/${slug}.txt"
+}
+
+# extracted/ and cleanup.sh stay in the work dir (local, potentially large).
 
 gitscan_utils_extracted_dir() {
     local work_dir
     work_dir="$1"
     echo "${work_dir}/extracted"
-}
-
-gitscan_utils_report_file() {
-    local work_dir
-    work_dir="$1"
-    echo "${work_dir}/report.txt"
 }
 
 gitscan_utils_cleanup_script() {
