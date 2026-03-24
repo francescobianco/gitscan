@@ -196,13 +196,20 @@ gitscan_push_run() {
 
     gitscan_utils_verify_mirror "$work_dir" || exit 1
 
+    # Read the remote URL once — used for push and for the re-clone hint.
+    local remote_url
+    remote_url="$(git --git-dir="$mirror_dir" \
+        config --get remote.origin.url 2>/dev/null || true)"
+
     gitscan_utils_warn "Force-pushing all refs to remote — IRREVERSIBLE"
+    gitscan_utils_info "Remote: ${remote_url:-unknown}"
 
     # Push each branch and tag individually.
-    # A single --mirror or wildcard refspec conflicts with the mirror push
-    # config already present in the repo, and --all triggers "deny updating
-    # a hidden ref" for refs/pull/* and similar host-managed refs.
-    # Iterating one ref at a time avoids both problems.
+    # The repo has remote.origin.mirror=true in its config; git refuses any
+    # refspec when that flag is active.  We override it per-command with
+    # -c remote.origin.mirror=false so refspecs work, while --all / --mirror
+    # are avoided entirely (--all still conflicts, --mirror pushes read-only
+    # refs like refs/pull/* that the host rejects).
 
     local ref pushed failed
     pushed=0
@@ -211,11 +218,13 @@ gitscan_push_run() {
     gitscan_utils_info "Pushing branches..."
     while IFS= read -r ref; do
         [ -z "$ref" ] && continue
-        if (cd "$mirror_dir" && git push --force origin \
+        gitscan_utils_info "  $ref"
+        if (cd "$mirror_dir" && \
+                git -c remote.origin.mirror=false push --force origin \
                 "${ref}:${ref}" 2>&1); then
             pushed=$((pushed + 1))
         else
-            gitscan_utils_warn "  Failed to push $ref"
+            gitscan_utils_warn "  Failed: $ref"
             failed=$((failed + 1))
         fi
     done < <(git --git-dir="$mirror_dir" \
@@ -224,11 +233,13 @@ gitscan_push_run() {
     gitscan_utils_info "Pushing tags..."
     while IFS= read -r ref; do
         [ -z "$ref" ] && continue
-        if (cd "$mirror_dir" && git push --force origin \
+        gitscan_utils_info "  $ref"
+        if (cd "$mirror_dir" && \
+                git -c remote.origin.mirror=false push --force origin \
                 "${ref}:${ref}" 2>&1); then
             pushed=$((pushed + 1))
         else
-            gitscan_utils_warn "  Failed to push $ref"
+            gitscan_utils_warn "  Failed: $ref"
             failed=$((failed + 1))
         fi
     done < <(git --git-dir="$mirror_dir" \
@@ -239,5 +250,9 @@ gitscan_push_run() {
     gitscan_utils_info "Push complete."
     echo ""
     echo "  IMPORTANT: All collaborators must re-clone the repository:"
-    echo "    git clone <repo-url>"
+    if [ -n "$remote_url" ]; then
+        echo "    git clone $remote_url"
+    else
+        echo "    git clone <repo-url>"
+    fi
 }
