@@ -196,12 +196,20 @@ gitscan_push_run() {
 
     gitscan_utils_verify_mirror "$work_dir" || exit 1
 
-    gitscan_utils_warn "Force-pushing all branches and tags to remote — IRREVERSIBLE"
-    gitscan_utils_info "Pushing branches..."
-    (cd "$mirror_dir" && git push --force --all 2>&1)
+    gitscan_utils_warn "Force-pushing all refs to remote — IRREVERSIBLE"
 
-    gitscan_utils_info "Pushing tags..."
-    (cd "$mirror_dir" && git push --force --tags 2>&1)
+    # A mirror clone has remote.origin.mirror=true which already implies
+    # a mirror refspec; combining it with --all causes a fatal conflict.
+    # Use --mirror for mirror clones, --all + --tags for plain bare repos.
+    if git --git-dir="$mirror_dir" config --get remote.origin.mirror >/dev/null 2>&1; then
+        gitscan_utils_info "Mirror repo detected — using git push --force --mirror"
+        (cd "$mirror_dir" && git push --force --mirror 2>&1)
+    else
+        gitscan_utils_info "Pushing branches..."
+        (cd "$mirror_dir" && git push --force --all 2>&1)
+        gitscan_utils_info "Pushing tags..."
+        (cd "$mirror_dir" && git push --force --tags 2>&1)
+    fi
 
     gitscan_utils_info "Push complete."
     echo ""
